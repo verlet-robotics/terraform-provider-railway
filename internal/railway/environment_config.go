@@ -12,12 +12,20 @@ type BucketConfig struct {
 }
 
 type ServiceConfig struct {
+	Build      *ServiceBuildConfig        `json:"build,omitempty"`
 	ConfigFile *string                    `json:"configFile"`
 	Deploy     *ServiceDeployConfig       `json:"deploy,omitempty"`
 	IsCreated  bool                       `json:"isCreated,omitempty"`
 	IsDeleted  bool                       `json:"isDeleted,omitempty"`
 	Source     *ServiceSourceConfig       `json:"source,omitempty"`
 	Variables  map[string]*VariableConfig `json:"variables,omitempty"`
+}
+
+type ServiceBuildConfig struct {
+	Builder        *string   `json:"builder"`
+	BuildCommand   *string   `json:"buildCommand"`
+	DockerfilePath *string   `json:"dockerfilePath"`
+	WatchPatterns  *[]string `json:"watchPatterns"`
 }
 
 type ServiceDeployConfig struct {
@@ -28,6 +36,11 @@ type ServiceDeployConfig struct {
 	MultiRegionConfig   map[string]*ServiceRegionConfig   `json:"multiRegionConfig"`
 	RegistryCredentials *ServiceRegistryCredentialsConfig `json:"registryCredentials"`
 	StartCommand        *string                           `json:"startCommand"`
+
+	PreDeployCommand        *[]string `json:"preDeployCommand"`
+	RestartPolicyType       *string   `json:"restartPolicyType"`
+	RestartPolicyMaxRetries *int64    `json:"restartPolicyMaxRetries"`
+	SleepApplication        *bool     `json:"sleepApplication"`
 }
 
 type ServiceLimitOverrideConfig struct {

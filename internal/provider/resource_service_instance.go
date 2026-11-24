@@ -14,8 +14,10 @@ import (
 	"github.com/hashicorp/terraform-plugin-framework/path"
 	"github.com/hashicorp/terraform-plugin-framework/resource"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/booldefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/float64default"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/int64default"
+	"github.com/hashicorp/terraform-plugin-framework/resource/schema/listdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/planmodifier"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringdefault"
 	"github.com/hashicorp/terraform-plugin-framework/resource/schema/stringplanmodifier"
@@ -57,6 +59,14 @@ type ServiceInstanceResourceModel struct {
 	HealthcheckTimeout                 types.Int64   `tfsdk:"healthcheck_timeout"`
 	VCpus                              types.Float64 `tfsdk:"vcpus"`
 	MemoryGb                           types.Float64 `tfsdk:"memory_gb"`
+	Builder                            types.String  `tfsdk:"builder"`
+	BuildCommand                       types.String  `tfsdk:"build_command"`
+	DockerfilePath                     types.String  `tfsdk:"dockerfile_path"`
+	WatchPatterns                      types.List    `tfsdk:"watch_patterns"`
+	PredeployCommand                   types.List    `tfsdk:"predeploy_command"`
+	RestartPolicyType                  types.String  `tfsdk:"restart_policy_type"`
+	RestartPolicyMaxRetries            types.Int64   `tfsdk:"restart_policy_max_retries"`
+	SleepApplication                   types.Bool    `tfsdk:"sleep_application"`
 }
 
 type ServiceInstanceRegionModel struct {
@@ -242,6 +252,65 @@ func (r *ServiceInstanceResource) Schema(ctx context.Context, req resource.Schem
 						float64validator.AtLeast(0.01),
 					),
 				},
+			},
+			"builder": schema.StringAttribute{
+				MarkdownDescription: "Builder: `RAILPACK`, `DOCKERFILE` or `NIXPACKS`. Omit to reset to Railway's default.",
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString(""),
+				Validators: []validator.String{
+					stringvalidator.OneOf("", "RAILPACK", "DOCKERFILE", "NIXPACKS"),
+				},
+			},
+			"build_command": schema.StringAttribute{
+				MarkdownDescription: "Custom build command. Omit to reset.",
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString(""),
+			},
+			"dockerfile_path": schema.StringAttribute{
+				MarkdownDescription: "Path to the Dockerfile used when `builder` is `DOCKERFILE`. Omit to reset.",
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString(""),
+			},
+			"watch_patterns": schema.ListAttribute{
+				MarkdownDescription: "Gitignore-style patterns; only changes matching them trigger deploys. Omit to reset.",
+				ElementType:         types.StringType,
+				Optional:            true,
+				Computed:            true,
+				Default:             listdefault.StaticValue(types.ListValueMust(types.StringType, []attr.Value{})),
+			},
+			"predeploy_command": schema.ListAttribute{
+				MarkdownDescription: "Commands run before each deploy (e.g. migrations). Omit to reset.",
+				ElementType:         types.StringType,
+				Optional:            true,
+				Computed:            true,
+				Default:             listdefault.StaticValue(types.ListValueMust(types.StringType, []attr.Value{})),
+			},
+			"restart_policy_type": schema.StringAttribute{
+				MarkdownDescription: "Restart policy: `ALWAYS`, `NEVER` or `ON_FAILURE`. Omit to reset to Railway's default.",
+				Optional:            true,
+				Computed:            true,
+				Default:             stringdefault.StaticString(""),
+				Validators: []validator.String{
+					stringvalidator.OneOf("", "ALWAYS", "NEVER", "ON_FAILURE"),
+				},
+			},
+			"restart_policy_max_retries": schema.Int64Attribute{
+				MarkdownDescription: "Maximum restarts for `ON_FAILURE`. Omit or set to zero to reset.",
+				Optional:            true,
+				Computed:            true,
+				Default:             int64default.StaticInt64(0),
+				Validators: []validator.Int64{
+					int64validator.AtLeast(0),
+				},
+			},
+			"sleep_application": schema.BoolAttribute{
+				MarkdownDescription: "Let the service sleep when idle (serverless). **Default** `false`.",
+				Optional:            true,
+				Computed:            true,
+				Default:             booldefault.StaticBool(false),
 			},
 		},
 	}
@@ -684,6 +753,7 @@ func (r *ServiceInstanceResource) read(ctx context.Context, data *ServiceInstanc
 	vcpus, memoryGb := flattenServiceInstanceLimits(response.ServiceInstanceLimitOverride)
 	data.VCpus = types.Float64Value(vcpus)
 	data.MemoryGb = types.Float64Value(memoryGb)
+	flattenServiceInstanceBuildDeploy(response.Environment.Config.Services[data.ServiceId.ValueString()], data)
 	data.Id = types.StringValue(serviceInstanceResourceId(*data))
 	return true, nil
 }
@@ -824,6 +894,12 @@ func expandServiceInstanceEnvironmentPatch(
 	return railway.EnvironmentConfig{
 		Services: map[string]railway.ServiceConfig{
 			data.ServiceId.ValueString(): {
+				Build: &railway.ServiceBuildConfig{
+					Builder:        stringPointer(data.Builder.ValueString()),
+					BuildCommand:   stringPointer(data.BuildCommand.ValueString()),
+					DockerfilePath: stringPointer(data.DockerfilePath.ValueString()),
+					WatchPatterns:  stringListPointer(data.WatchPatterns),
+				},
 				ConfigFile: stringPointer(data.ConfigPath.ValueString()),
 				Source: &railway.ServiceSourceConfig{
 					Image:         stringPointer(data.SourceImage.ValueString()),
@@ -841,6 +917,11 @@ func expandServiceInstanceEnvironmentPatch(
 					MultiRegionConfig:   multiRegionConfig,
 					RegistryCredentials: registryCredentials,
 					StartCommand:        stringPointer(data.StartCommand.ValueString()),
+
+					PreDeployCommand:        stringListPointer(data.PredeployCommand),
+					RestartPolicyType:       stringPointer(data.RestartPolicyType.ValueString()),
+					RestartPolicyMaxRetries: int64Pointer(data.RestartPolicyMaxRetries.ValueInt64()),
+					SleepApplication:        boolPointer(data.SleepApplication.ValueBool()),
 				},
 			},
 		},
@@ -920,4 +1001,68 @@ func flattenServiceInstanceLimits(limitOverride railway.ServiceLimitOverrideConf
 		memoryBytes = *limitOverride.Containers.MemoryBytes
 	}
 	return vcpus, memoryBytes / 1_000_000_000
+}
+
+// Zero values mean "unset": they are sent as null so Railway resets them to its default.
+func int64Pointer(value int64) *int64 {
+	if value == 0 {
+		return nil
+	}
+	return &value
+}
+
+func boolPointer(value bool) *bool {
+	if !value {
+		return nil
+	}
+	return &value
+}
+
+func stringListPointer(value types.List) *[]string {
+	if value.IsNull() || value.IsUnknown() || len(value.Elements()) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(value.Elements()))
+	for _, element := range value.Elements() {
+		if s, ok := element.(types.String); ok {
+			out = append(out, s.ValueString())
+		}
+	}
+	return &out
+}
+
+func stringListValue(value *[]string) types.List {
+	elements := []attr.Value{}
+	if value != nil {
+		for _, s := range *value {
+			elements = append(elements, types.StringValue(s))
+		}
+	}
+	return types.ListValueMust(types.StringType, elements)
+}
+
+// flattenServiceInstanceBuildDeploy reads build/deploy settings from the
+// environment config document; absent keys flatten to the attribute defaults.
+func flattenServiceInstanceBuildDeploy(service railway.ServiceConfig, data *ServiceInstanceResourceModel) {
+	build := service.Build
+	if build == nil {
+		build = &railway.ServiceBuildConfig{}
+	}
+	deploy := service.Deploy
+	if deploy == nil {
+		deploy = &railway.ServiceDeployConfig{}
+	}
+
+	data.Builder = optionalStringValue(build.Builder)
+	data.BuildCommand = optionalStringValue(build.BuildCommand)
+	data.DockerfilePath = optionalStringValue(build.DockerfilePath)
+	data.WatchPatterns = stringListValue(build.WatchPatterns)
+	data.PredeployCommand = stringListValue(deploy.PreDeployCommand)
+	data.RestartPolicyType = optionalStringValue(deploy.RestartPolicyType)
+	if deploy.RestartPolicyMaxRetries != nil {
+		data.RestartPolicyMaxRetries = types.Int64Value(*deploy.RestartPolicyMaxRetries)
+	} else {
+		data.RestartPolicyMaxRetries = types.Int64Value(0)
+	}
+	data.SleepApplication = types.BoolValue(deploy.SleepApplication != nil && *deploy.SleepApplication)
 }
